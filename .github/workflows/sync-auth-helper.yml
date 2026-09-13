@@ -1,0 +1,60 @@
+# Firebase が配っているサインイン用ヘルパーを月1回取り直し、差分があれば main に入れる。
+#
+# 自前配信は取得時点のスナップショットなので、Google 側の修正を追随させる必要がある。
+# 判断が要る処理は無く、Google の配信をそのまま写す（自前配信する前は元々そうだった）。
+#
+# 差分が無くても LAST_CHECKED を更新してコミットする。GitHub は 60 日間コミットの無い
+# リポジトリのスケジュール実行を止めるため、更新が要るときに限って止まっている事故を防ぐ。
+name: Sync Firebase auth helper
+
+on:
+  schedule:
+    - cron: '17 3 1 * *' # 毎月1日 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-auth-helper
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Google 側のヘルパーを取得
+        run: |
+          set -euo pipefail
+          S=https://project-db31f07b-2895-48b8-8bb.firebaseapp.com/__/auth
+          # -f: 4xx/5xx はエラー。エラーページを本物のファイルとして書き込まない
+          for f in handler iframe links; do curl -fsS -o "__/auth/$f.html" "$S/$f"; done
+          for f in handler.js iframe.js links.js experiments.js; do curl -fsS -o "__/auth/$f" "$S/$f"; done
+
+      - name: 取得したものが壊れていないか
+        run: |
+          set -euo pipefail
+          for f in handler iframe links; do
+            head -c 15 "__/auth/$f.html" | grep -q '<!DOCTYPE html>' || { echo "$f.html が HTML ではない"; exit 1; }
+          done
+          for f in handler.js iframe.js links.js experiments.js; do
+            [ -s "__/auth/$f" ] || { echo "$f が空"; exit 1; }
+          done
+          date -u +%Y-%m-%d > LAST_CHECKED
+
+      - name: 差分があればコミットして push
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then echo "変更なし"; exit 0; fi
+          if git diff --cached --name-only | grep -q '^__/auth/'; then
+            msg="Firebase のサインイン用ヘルパーを取り直す"
+          else
+            msg="ヘルパーの確認日を更新する（差分なし）"
+          fi
+          git commit -m "$msg" -m "$(git diff --cached --stat | tail -n +1)"
+          git push
